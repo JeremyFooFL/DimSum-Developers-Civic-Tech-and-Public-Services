@@ -1,0 +1,36 @@
+{
+  "model_id": "yolo_v1_int8_640",
+  "model_version": "1.0.0",
+  "description": "YOLO model for on-device camera detection",
+  "created_at": "2026-03-25",
+  "runtime": {
+    "engine": "tflite",
+    "model_path": "assets/data/models/yolo/v1/model.tflite",
+    "labels_path": "assets/data/models/yolo/v1/labels.txt",
+    "input": {
+      "width": 640,
+      "height": 640,
+      "channels": 3,
+      "color_space": "rgb",
+      "normalization": {
+        "mean": [0.0, 0.0, 0.0],
+        "std": [255.0, 255.0, 255.0]
+      }
+    },
+    "output": {
+      "format": "yolo",
+      "boxes": "xywh",
+      "class_count": 80
+    }
+  },
+  "postprocess": {
+    "confidence_threshold": 0.35,
+    "iou_threshold": 0.45,
+    "max_detections": 100
+  },
+  "integrity": {
+    "model_sha256": "REPLACE_WITH_MODEL_SHA256",
+    "labels_sha256": "REPLACE_WITH_LABELS_SHA256"
+  },
+  "notes": "Update thresholds and class_count to match your exported model."
+}
