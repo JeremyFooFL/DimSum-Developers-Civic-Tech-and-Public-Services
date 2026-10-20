@@ -1,4 +1,5 @@
 import argparse
+import os
 import cv2
 import numpy as np
 from ultralytics import YOLO
@@ -9,28 +10,20 @@ from threading import Lock, Thread
 from flask import Flask, jsonify
 from flask_cors import CORS
 
+MODEL_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "yolov8n.pt")
+
 
 class TrainDetector:
     def __init__(self):
         print("Initializing Train Detector...")
         self.capacity_step = 25
 
-        # Load YOLO model
-        print("Loading YOLOv8...")
-        self.model = YOLO("yolov8n.pt")
-
-        # Initialize webcam
-        self.cap = cv2.VideoCapture(0)
-        if not self.cap.isOpened():
-            raise RuntimeError("Could not open webcam")
-
-        # Get camera properties
-        self.width = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-        self.height = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-        print(f"Camera resolution: {self.width}x{self.height}")
-
-        # Counting line (vertical line in center)
-        self.counting_line_x = self.width // 2
+        # Model and camera are loaded on start, so the API can idle without them
+        self.model = None
+        self.cap = None
+        self.width = 0
+        self.height = 0
+        self.counting_line_x = 0
 
         # Tracking variables
         self.person_tracks = defaultdict(list)
@@ -41,7 +34,30 @@ class TrainDetector:
         self.max_trail_length = 20
         self.counter_lock = Lock()
 
-        # Running flag
+        # Lifecycle: state is one of stopped | starting | running | error
+        self.is_running = False
+        self.state = "stopped"
+        self.error = None
+        self.thread = None
+        self.lifecycle_lock = Lock()
+
+    def start(self):
+        """Start detection on a background thread. Safe to call repeatedly."""
+        with self.lifecycle_lock:
+            if self.thread is not None and self.thread.is_alive():
+                if self.is_running:
+                    return
+                # A stop is still releasing the camera; let it finish first
+                self.thread.join(timeout=5)
+
+            self.state = "starting"
+            self.error = None
+            self.is_running = True
+            self.thread = Thread(target=self.run, daemon=True)
+            self.thread.start()
+
+    def stop(self):
+        """Ask the detection loop to exit; it releases the camera itself."""
         self.is_running = False
 
     def get_stats(self):
@@ -54,6 +70,8 @@ class TrainDetector:
                 "occupancy": occupancy,
                 "capacityPercent": max(0, occupancy * self.capacity_step),
                 "active_detections": len(self.person_tracks),
+                "detector": self.state,
+                "detectorError": self.error,
                 "timestamp": datetime.now().isoformat(),
             }
 
@@ -196,34 +214,65 @@ class TrainDetector:
         occ_color = (0, 255, 0) if current < 5 else (0, 165, 255) if current < 10 else (0, 0, 255)
         cv2.putText(frame, f"On Train: {current}", (20, 140), cv2.FONT_HERSHEY_SIMPLEX, 0.7, occ_color, 2)
 
+    def _open(self):
+        if self.model is None:
+            print("Loading YOLOv8...")
+            self.model = YOLO(MODEL_PATH)
+
+        self.cap = cv2.VideoCapture(0)
+        if not self.cap.isOpened():
+            raise RuntimeError("Could not open webcam")
+
+        # Get camera properties
+        self.width = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        self.height = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        print(f"Camera resolution: {self.width}x{self.height}")
+
+        # Counting line (vertical line in center)
+        self.counting_line_x = self.width // 2
+
     def run(self):
-        """Main loop: call this to start detection."""
+        """Detection loop: opens the camera, runs until stopped, then cleans up."""
         self.is_running = True
-        print("\nStarting detection...")
-        print("Walk LEFT->RIGHT to ENTER | RIGHT->LEFT to EXIT")
-        print("Press 'Q' to quit | 'R' to reset\n")
+        self.state = "starting"
+        try:
+            self._open()
+            self.reset_counts()
+            self.state = "running"
+            print("\nStarting detection...")
+            print("Walk LEFT->RIGHT to ENTER | RIGHT->LEFT to EXIT")
+            print("Press 'Q' to stop detection | 'R' to reset\n")
 
-        while self.is_running:
-            ret, frame = self.cap.read()
-            if not ret:
-                break
+            while self.is_running:
+                ret, frame = self.cap.read()
+                if not ret:
+                    break
 
-            processed = self.process_frame(frame)
-            cv2.imshow("Train Detector", processed)
+                processed = self.process_frame(frame)
+                cv2.imshow("Train Detector", processed)
 
-            key = cv2.waitKey(1) & 0xFF
-            if key == ord("q"):
-                self.is_running = False
-            elif key == ord("r"):
-                self.reset_counts()
-                print("Reset")
+                key = cv2.waitKey(1) & 0xFF
+                if key == ord("q"):
+                    self.is_running = False
+                elif key == ord("r"):
+                    self.reset_counts()
+                    print("Reset")
 
-        self.cleanup()
+            self.state = "stopped"
+        except Exception as exc:
+            print(f"Detector error: {exc}")
+            self.error = str(exc)
+            self.state = "error"
+        finally:
+            self.is_running = False
+            self.cleanup()
 
     def cleanup(self):
-        self.cap.release()
+        if self.cap is not None:
+            self.cap.release()
+            self.cap = None
         cv2.destroyAllWindows()
-        print(f"\nFinal: {self.boarding_count} entered, {self.exiting_count} exited")
+        print(f"\nDetection stopped: {self.boarding_count} entered, {self.exiting_count} exited")
 
 
 def create_api(detector: TrainDetector) -> Flask:
@@ -232,10 +281,20 @@ def create_api(detector: TrainDetector) -> Flask:
 
     @app.get('/health')
     def health():
-        return jsonify({'status': 'ok'})
+        return jsonify({'status': 'ok', 'detector': detector.state})
 
     @app.get('/capacity')
     def capacity():
+        return jsonify(detector.get_stats())
+
+    @app.post('/detector/start')
+    def detector_start():
+        detector.start()
+        return jsonify(detector.get_stats())
+
+    @app.post('/detector/stop')
+    def detector_stop():
+        detector.stop()
         return jsonify(detector.get_stats())
 
     @app.post('/event/enter')
@@ -265,9 +324,9 @@ if __name__ == "__main__":
 
     detector = TrainDetector()
     if args.api:
+      # Detection starts when the app switches "Sync with YOLO backend" on
+      print(f"API ready on port {args.port}. Waiting for the app to start detection...")
       api = create_api(detector)
-      detector_thread = Thread(target=detector.run, daemon=True)
-      detector_thread.start()
       api.run(host=args.host, port=args.port, debug=False)
     else:
       detector.run()

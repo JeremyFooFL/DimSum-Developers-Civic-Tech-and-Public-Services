@@ -52,6 +52,9 @@ class _CapacityTestPageState extends State<CapacityTestPage> {
 
   @override
   void dispose() {
+    if (_syncWithBackend) {
+      _stopDetector();
+    }
     _backendPollTimer?.cancel();
     _backendUrlController.dispose();
     super.dispose();
@@ -83,8 +86,63 @@ class _CapacityTestPageState extends State<CapacityTestPage> {
     });
 
     if (_syncWithBackend) {
-      _fetchBackendCapacity();
+      _startDetector();
     }
+  }
+
+  Future<void> _setSyncEnabled(bool enabled) async {
+    setState(() {
+      _syncWithBackend = enabled;
+      _backendStatus = enabled
+          ? 'Starting YOLO detector at $_backendBaseUrl'
+          : 'Local simulation mode';
+    });
+
+    if (enabled) {
+      await _startDetector();
+    } else {
+      _stopDetector();
+    }
+  }
+
+  Future<void> _startDetector() async {
+    try {
+      final response = await http
+          .post(Uri.parse('$_backendBaseUrl/detector/start'))
+          .timeout(const Duration(seconds: 3));
+
+      // 404 = the simulation backend (capacity_api.py), which has no detector.
+      if (response.statusCode != 200 && response.statusCode != 404) {
+        if (!mounted) {
+          return;
+        }
+
+        setState(() {
+          _backendStatus = 'Unable to start detector (${response.statusCode})';
+          _syncWithBackend = false;
+        });
+        return;
+      }
+
+      await _fetchBackendCapacity();
+    } catch (_) {
+      if (!mounted) {
+        return;
+      }
+
+      setState(() {
+        _backendStatus =
+            'Backend is not running at $_backendBaseUrl. Start it with run_demo.ps1.';
+        _syncWithBackend = false;
+      });
+    }
+  }
+
+  void _stopDetector() {
+    http
+        .post(Uri.parse('$_backendBaseUrl/detector/stop'))
+        .timeout(const Duration(seconds: 2))
+        .ignore();
   }
 
   Color _loadColor(BuildContext context, int percent) {
@@ -378,6 +436,7 @@ class _CapacityTestPageState extends State<CapacityTestPage> {
 
       final payload = jsonDecode(response.body) as Map<String, dynamic>;
       final percent = (payload['capacityPercent'] as num?)?.toInt() ?? 0;
+      final detectorState = payload['detector'] as String?;
 
       if (!mounted) {
         return;
@@ -385,7 +444,21 @@ class _CapacityTestPageState extends State<CapacityTestPage> {
 
       setState(() {
         _testCapacityPercent = percent < 0 ? 0 : percent;
-        _backendStatus = 'Connected to YOLO backend';
+
+        switch (detectorState) {
+          case 'starting':
+            _backendStatus = 'Starting YOLO detector (loading model, opening camera)...';
+          case 'running':
+            _backendStatus = 'Connected to YOLO backend';
+          case 'error':
+            _backendStatus = 'Detector error: ${payload['detectorError'] ?? 'unknown'}';
+            _syncWithBackend = false;
+          case 'stopped':
+            _backendStatus = 'Detector stopped';
+            _syncWithBackend = false;
+          default:
+            _backendStatus = 'Connected to backend (simulation)';
+        }
       });
     } catch (_) {
       if (!mounted) {
@@ -601,18 +674,7 @@ class _CapacityTestPageState extends State<CapacityTestPage> {
                           title: const Text('Sync with YOLO backend'),
                           subtitle: Text(_backendStatus),
                           value: _syncWithBackend,
-                          onChanged: (enabled) {
-                            setState(() {
-                              _syncWithBackend = enabled;
-                              _backendStatus = enabled
-                                  ? 'Connecting to $_backendBaseUrl'
-                                  : 'Local simulation mode';
-                            });
-
-                            if (enabled) {
-                              _fetchBackendCapacity();
-                            }
-                          },
+                          onChanged: _setSyncEnabled,
                         ),
                         Text(
                           'Backend URL: $_backendBaseUrl',
