@@ -12,7 +12,7 @@ class MyApp extends StatelessWidget {
     );
 
     return MaterialApp(
-      title: 'Seven Pages Demo',
+      title: 'RailSense',
       theme: ThemeData(
         colorScheme: baseScheme.copyWith(
           surface: Colors.white,

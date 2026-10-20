@@ -11,7 +11,7 @@ class HomePage extends StatelessWidget {
   Widget build(BuildContext context) {
     return const AppScaffold(
       currentIndex: 0,
-      title: 'Smartrail Capacity Insight',
+      title: 'RailSense',
       body: _RouteSearchContent(),
     );
   }

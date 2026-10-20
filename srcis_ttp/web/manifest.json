@@ -1,6 +1,6 @@
 {
-    "name": "srcis_ttp",
-    "short_name": "srcis_ttp",
+    "name": "RailSense",
+    "short_name": "RailSense",
     "start_url": ".",
     "display": "standalone",
     "background_color": "#0175C2",
